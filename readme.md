@@ -73,14 +73,18 @@ Use this if Signal K is installed directly on your Raspberry Pi OS application l
    cd signalk-h5000-websocket
    ```
 
-4. **Populate the plugin files:** Place your `package.json` and customized visual `index.js` files directly inside this folder.
-
-5. **Install production dependencies:**
+4. Clone the repository via Git:
+   ```bash
+   git clone [https://github.com/theseal666/signalk-h5000-websocket.git](https://github.com/your-username/signalk-h5000-websocket.git)
+   cd signalk-h5000-websocket
+   ```
+   
+6. **Install production dependencies:**
    ```bash
    npm install --production
    ```
 
-6. **Restart the Signal K Engine:**
+7. **Restart the Signal K Engine:**
    ```bash
    sudo systemctl restart signalk-server
    ```
@@ -114,7 +118,8 @@ services:
    ```bash
    mkdir signalk-h5000-websocket
    cd signalk-h5000-websocket
-   # Save your package.json and your UI-driven index.js files into this folder
+   git clone [https://github.com/theseal666/signalk-h5000-websocket.git](https://github.com/your-username/signalk-h5000-websocket.git)
+   cd signalk-h5000-websocket
    ```
 
 #### Step 3: Compile Dependencies inside the Container Context
