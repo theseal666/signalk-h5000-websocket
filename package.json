@@ -1,0 +1,12 @@
+{
+  "name": "signalk-h5000-websocket",
+  "version": "1.0.0",
+  "description": "Signal K plugin to read high-frequency data from a B&G H5000 CPU via WebSockets",
+  "main": "index.js",
+  "keywords": [
+    "signalk-node-server-plugin"
+  ],
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}
