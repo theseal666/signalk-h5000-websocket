@@ -19,46 +19,43 @@ By pulling data directly from the H5000 web server over Ethernet, this plugin by
                                            +-----------------------------------+
 ```
 
-The B&G H5000 CPU streams its internal data dictionary as JSON objects over WebSocket port `2053`. This plugin connects as a client, translates the proprietary Navico `DataId` identifiers into standardized, SI-compliant Signal K paths, and commits them directly to the server's delta stream.
+The B&G H5000 CPU streams its internal data dictionary as JSON objects over WebSocket port `2053`. This plugin connects as a client, reads your custom mapping configurations directly from the Signal K UI, translates the proprietary Navico `DataId` identifiers into standardized, SI-compliant Signal K paths, and commits them to the server's delta stream.
 
 ---
 
-## Sensor Discovery & Mapping Workflow
+## Sensor Discovery & UI Configuration Workflow
 
-Because every sailboat has a unique array of sensors (such as linear rudder feedback, forestay load cells, or mast rotation indicators), the H5000 maps custom variables dynamically based on how your network was commissioned. Use this workflow to dynamically map your entire system:
+Because every modern sailboat is equipped with a distinct set of sensors (e.g., custom linear rudder feedback, forestay load cells, mast rotation, or tank gauges), the H5000 maps variables dynamically based on how your network was commissioned. This plugin provides a completely code-free configuration panel built directly into the Signal K Web UI.
 
-### 1. Discover Data IDs via Browser Developer Tools
-1. Connect a computer to the boat's network and navigate to the H5000 interface (`http://<YOUR_H5000_IP>`).
+### Step 1: Discover Data IDs via Browser Developer Tools
+1. Connect a laptop or nav-station computer to the boat's network and navigate to the H5000 web interface (`http://<YOUR_H5000_IP>`).
 2. Press **F12** (or Right-Click -> *Inspect*) to open your browser's Developer Tools.
 3. Select the **Network** tab, click the **WS** (WebSockets) filter sub-tab, and reload the page.
-4. Click on the active socket stream connection (typically ending in `:2053`) and select its **Messages** or **Frames** tab.
-5. You will see a fast waterfall stream of JSON packets. Actuate your target sensor (e.g., move the rudder wheel or tension the forestay) and observe which `DataId` updates in real-time.
+4. Click on the active connection (typically ending in `:2053`) and select its **Messages** or **Frames** tab.
+5. You will see a live, high-frequency waterfall stream of JSON packets. Actuate your target sensor (e.g., move the rudder wheel or crank the forestay tension) and note which `DataId` updates its value in real-time.
 
-### 2. Append Maps to `index.js`
-Open your plugin's `index.js` file and find the `H5000_TO_SIGNALK` object. Add your newly discovered `DataId`, choose its standard Signal K dot-notation path, and match it to a unit transformation `type` (`speed`, `angle`, or `tension_lbs`).
-
-```javascript
-const H5000_TO_SIGNALK = {
-  // --- Core Navigation & Performance Metrics ---
-  1:   { path: 'navigation.speedThroughWater', type: 'speed' },
-  2:   { path: 'environment.wind.speedApparent', type: 'speed' },
-  3:   { path: 'environment.wind.angleApparent', type: 'angle' },
-  24:  { path: 'navigation.attitude.roll', type: 'angle' },              // Heel
-
-  // --- Advanced Sensor Hardware (Steering & Rigging Example) ---
-  15:  { path: 'steering.rudderAngle', type: 'angle' },                  // Linear Rudder Sensor
-  42:  { path: 'propulsion.mast.forestayTension', type: 'tension_lbs' }  // Forestay Loadcell (Lbs -> N)
-};
-```
+### Step 2: Input Mappings Visually into Signal K
+1. Open your Signal K Admin Portal (`http://<your-pi-ip>:3000`).
+2. Navigate to **Server** -> **Plugin Config** and select **B&G H5000 WebSocket Ingest** from the list.
+3. Under the **Custom Sensor Mappings** array section, click **Add Item** for each telemetry channel you want to capture.
+4. Fill out the visual fields:
+   * **H5000 Data ID:** The numerical ID discovered using your Dev Tools (e.g., `15` for rudder angle, `42` for forestay).
+   * **Signal K Path:** The official standard path where the metric belongs (e.g., `steering.rudderAngle` or `propulsion.mast.forestayTension`).
+   * **Unit Conversion Type:** Select the mathematical math-parser translation required. *Note: Signal K strictly enforces SI base metrics internally (Meters per Second for speed, Radians for angles/rotation, and Newtons for rigging tension).*
+     * *No Conversion:* Pass-through raw value.
+     * *Knots to Meters/Second:* For boat speed or wind speed metrics.
+     * *Degrees to Radians:* For angles, heading, leeway, or roll.
+     * *Pounds-Force to Newtons:* For strain gauges and rig load cells.
+5. Click **Submit**. The plugin will instantly reload, compile your mapping dictionary, and begin feeding the standard data streams.
 
 ---
 
 ## Installation & Setup
 
-Choose the deployment method matching your Signal K installation profile.
+Choose the installation method that matches your Signal K deployment layout.
 
 ### Option 1: Raw (Bare-Metal) Installation
-Use this if Signal K is installed directly on your Raspberry Pi OS environment.
+Use this if Signal K is installed directly on your Raspberry Pi OS application layer via Node/NPM.
 
 1. **Access your server:** SSH into your Raspberry Pi.
    ```bash
@@ -76,7 +73,7 @@ Use this if Signal K is installed directly on your Raspberry Pi OS environment.
    cd signalk-h5000-websocket
    ```
 
-4. **Populate the plugin files:** Drop your updated `package.json` and customized `index.js` files inside this folder.
+4. **Populate the plugin files:** Place your `package.json` and customized visual `index.js` files directly inside this folder.
 
 5. **Install production dependencies:**
    ```bash
@@ -91,10 +88,10 @@ Use this if Signal K is installed directly on your Raspberry Pi OS environment.
 ---
 
 ### Option 2: Signal K inside Docker Installation
-If you run Signal K inside a Docker container (e.g., using the `signalk/signalk-server` image), plugins must be stored inside the persistent data directory mapped to the container's `/home/node/.signalk` workspace.
+If you run Signal K inside an isolated Docker container (e.g., via the official `signalk/signalk-server` image), plugins must be injected into the host volume folder mapped to the container's persistent `/home/node/.signalk` workspace.
 
-#### Step 1: Locate your persistent data folder
-Examine your `docker-compose.yml` configuration to find your local volume location. A typical setup looks like this:
+#### Step 1: Locate your host volume mapping
+Examine your container's `docker-compose.yml` configuration to find your persistent data storage path. A standard configuration typically bridges like this:
 
 ```yaml
 version: '3.7'
@@ -108,8 +105,8 @@ services:
     restart: unless-stopped
 ```
 
-#### Step 2: Create the Plugin Folder on the Host
-1. On your host system, navigate to your persistent volume context:
+#### Step 2: Create the Plugin Folder on the Host Machine
+1. On your host system, navigate to the persistent volume folder context:
    ```bash
    cd /path/to/your/docker-compose/signalk-data/node_modules
    ```
@@ -117,39 +114,30 @@ services:
    ```bash
    mkdir signalk-h5000-websocket
    cd signalk-h5000-websocket
-   # Save your package.json and your index.js files right here
+   # Save your package.json and your UI-driven index.js files into this folder
    ```
 
 #### Step 3: Compile Dependencies inside the Container Context
-To maintain architecture compatibility, let the container run the compilation lifecycle:
+To maintain architecture and node-version binary compatibility, execute the package dependency installer contextually inside the container layer:
 ```bash
 docker-compose exec signalk-server npm install --prefix /home/node/.signalk/node_modules/signalk-h5000-websocket --production
 ```
 
 #### Step 4: Restart the Container Profile
-Apply all folder bindings and restart the runtime process:
+Breathe changes into the stack by bouncing the runtime service:
 ```bash
 docker-compose restart signalk-server
 ```
 
 ---
 
-## Configuration & Validation
+## Validation & Troubleshooting
 
-1. Open your web browser and navigate to your Signal K Management Portal (`http://<your-pi-ip>:3000`).
-2. Navigate to **Server** -> **Plugin Config**.
-3. Select **B&G H5000 WebSocket Ingest** from the side-rail navigation.
-4. Input your specific environment parameters:
-   * **H5000 CPU IP Address:** The target static IP belonging to your H5000 CPU.
-   * **H5000 WebSocket Port:** Fixed by default at `2053`.
-5. Click **Submit**. 
-6. **Validation:** Open the Signal K **Data Browser** in the server UI. Your live custom telemetry definitions (e.g., `propulsion.mast.forestayTension`) will immediately populate alongside your standard hardware stream components, automatically translated into correct SI base units.
-
----
-
-## Troubleshooting
+### Data Browser Verification
+Once configurations are saved and the plugin badge displays an active connection state, navigate to the **Data Browser** in the Signal K side menu. Your custom defined paths (e.g., `propulsion.mast.forestayTension`) will stream cleanly in real-time alongside your native hardware streams, ready to be utilized by dashboard apps (like Kip or InstrumentPanel) or time-series data loggers (like InfluxDB).
 
 ### Inspecting Live Debug Messages
-If metrics aren't compiling cleanly down the data tree:
-1. Navigate to **Server** -> **Debug Log** within the Web UI.
-2. Put `signalk-h5000-websocket` in the search box to watch low-level packet capture, pipeline handshakes, connection errors, or translation validation metrics in real time.
+If variables fail to populate correctly or the connection drops:
+1. Navigate to **Server** -> **Debug Log** within the Signal K Web UI.
+2. Put `signalk-h5000-websocket` in the search box to filter low-level logging messages.
+3. You will see detailed real-time traces tracking web socket server connections, connection retries, parsing validations, and missing ID warnings.
