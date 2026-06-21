@@ -75,7 +75,8 @@ Use this if Signal K is installed directly on your Raspberry Pi OS application l
 
 4. Clone the repository via Git:
    ```bash
-   git clone [https://github.com/theseal666/signalk-h5000-websocket.git](https://github.com/theseal666/signalk-h5000-websocket.git)
+   git clone https://github.com/theseal666/signalk-h5000-websocket.git
+   cd signalk-h5000-websocket
    
    ```
    
@@ -116,8 +117,7 @@ services:
    ```
 2. Build the directory path and paste your code files:
    ```bash
-   mkdir signalk-h5000-websocket
-   git clone [https://github.com/theseal666/signalk-h5000-websocket.git](https://github.com/theseal666/signalk-h5000-websocket.git)
+   git clone https://github.com/theseal666/signalk-h5000-websocket.git
    cd signalk-h5000-websocket
    ```
 
