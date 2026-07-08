@@ -7,7 +7,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/theseal666/signalk-h5000-websocket.git"
+    "url": "git+https://github.com/theseal666/signalk-h5000-websocket.git"
   },
   "keywords": [
     "signalk-node-server-plugin"
