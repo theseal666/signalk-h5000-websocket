@@ -4,6 +4,7 @@ module.exports = function (app) {
   let plugin = {};
   let ws = null;
   let reconnectTimer = null;
+  let stopped = false;
 
   plugin.id = 'signalk-h5000-websocket';
   plugin.name = 'B&G H5000 WebSocket Ingest';
@@ -44,6 +45,7 @@ module.exports = function (app) {
             conversionType: {
               type: 'string',
               title: 'Unit Conversion Type',
+              description: 'Only applied when the H5000 omits sysVal (already SI) and the plugin falls back to the display value.',
               default: 'none',
               enum: ['none', 'speed', 'angle', 'tension_lbs'],
               enumNames: [
@@ -75,82 +77,95 @@ module.exports = function (app) {
     }
   }
 
-  plugin.start = function (options, restartPlugin) {
-    app.handleMessage(plugin.id, { info: 'Initializing Configurable B&G H5000 Feed' });
+  plugin.start = function (options) {
+    stopped = false;
+
+    if (!options || !options.ipAddress) {
+      app.setPluginStatus('Not configured: set the H5000 CPU IP address in the plugin config');
+      return;
+    }
 
     // Build a runtime dictionary map out of the user's UI config array for O(1) high-frequency performance
     const activeMappings = {};
-    if (options.sensorMappings && Array.isArray(options.sensorMappings)) {
-      options.sensorMappings.forEach(mapping => {
-        if (mapping.dataId) {
-          activeMappings[mapping.dataId] = {
-            path: mapping.path,
-            type: mapping.conversionType
-          };
-        }
-      });
-    }
+    (options.sensorMappings || []).forEach(mapping => {
+      if (mapping.dataId != null) {
+        activeMappings[mapping.dataId] = {
+          path: mapping.path,
+          type: mapping.conversionType
+        };
+      }
+    });
 
     function connect() {
-      const url = `ws://${options.ipAddress}:${options.port}`;
-      app.debug(`Connecting to H5000 CPU via UI configs at: ${url}`);
+      const url = `ws://${options.ipAddress}:${options.port || 2053}`;
+      app.debug(`Connecting to H5000 CPU at ${url}`);
 
       ws = new WebSocket(url);
 
       ws.on('open', () => {
-        app.setPluginStatus(`Active: Streaming ${Object.keys(activeMappings).length} mapped sensors from ${options.ipAddress}`);
+        // The GoFree Data Service only sends data that has been subscribed to,
+        // so request a repeating feed of every configured Data ID.
+        const request = {
+          DataReq: Object.keys(activeMappings).map(id => ({
+            id: Number(id),
+            repeat: true,
+            inst: 0
+          }))
+        };
+        ws.send(JSON.stringify(request));
+        app.setPluginStatus(`Connected to ${options.ipAddress}, subscribed to ${request.DataReq.length} data IDs`);
       });
 
       ws.on('message', (data) => {
         try {
           const packet = JSON.parse(data);
-          const dataId = packet.DataId;
-          
-          // Verify if the incoming Data ID exists in our UI-configured map
-          if (dataId && activeMappings[dataId] && packet.Valid !== false) {
-            const config = activeMappings[dataId];
-            const skValue = convertValue(packet.Value, config.type);
+          if (!Array.isArray(packet.Data)) return;
+
+          const values = [];
+          packet.Data.forEach(item => {
+            const config = activeMappings[item.id];
+            if (!config || item.valid === false) return;
+
+            // sysVal is already in SI units; the display value needs the configured conversion
+            const skValue = typeof item.sysVal === 'number'
+              ? item.sysVal
+              : convertValue(item.val, config.type);
 
             if (skValue !== null) {
-              const delta = {
-                updates: [
-                  {
-                    source: {
-                      label: 'h5000-websocket',
-                      type: 'Ethernet',
-                      talker: 'B&G'
-                    },
-                    timestamp: new Date().toISOString(),
-                    values: [
-                      {
-                        path: config.path,
-                        value: skValue
-                      }
-                    ]
-                  }
-                ]
-              };
-              app.handleMessage(plugin.id, delta);
+              values.push({ path: config.path, value: skValue });
             }
+          });
+
+          if (values.length > 0) {
+            app.handleMessage(plugin.id, {
+              updates: [
+                {
+                  source: { label: 'h5000-websocket' },
+                  values: values
+                }
+              ]
+            });
           }
         } catch (err) {
-          app.debug(`Parsing mismatch: ${err.message}`);
+          app.debug(`Failed to parse message: ${err.message}`);
         }
       });
 
       ws.on('close', () => {
-        app.setPluginStatus('H5000 stream disconnected. Re-trying handshake loop...');
-        scheduleReconnect();
+        if (!stopped) {
+          app.setPluginStatus('H5000 stream disconnected, reconnecting...');
+          scheduleReconnect();
+        }
       });
 
       ws.on('error', (err) => {
-        app.debug(`Socket stream fault: ${err.message}`);
-        ws.close();
+        app.debug(`WebSocket error: ${err.message}`);
+        ws.terminate();
       });
     }
 
     function scheduleReconnect() {
-      if (!reconnectTimer) {
+      if (!reconnectTimer && !stopped) {
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null;
           connect();
@@ -162,13 +177,14 @@ module.exports = function (app) {
   };
 
   plugin.stop = function () {
-    if (ws) {
-      ws.close();
-      ws = null;
-    }
+    stopped = true;
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
+    }
+    if (ws) {
+      ws.terminate();
+      ws = null;
     }
     app.setPluginStatus('Stopped');
   };

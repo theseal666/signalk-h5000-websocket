@@ -19,7 +19,7 @@ By pulling data directly from the H5000 web server over Ethernet, this plugin by
                                            +-----------------------------------+
 ```
 
-The B&G H5000 CPU streams its internal data dictionary as JSON objects over WebSocket port `2053`. This plugin connects as a client, reads your custom mapping configurations directly from the Signal K UI, translates the proprietary Navico `DataId` identifiers into standardized, SI-compliant Signal K paths, and commits them to the server's delta stream.
+The B&G H5000 CPU exposes its internal data dictionary through Navico's GoFree Data Service on WebSocket port `2053`. The service is subscription-based: this plugin connects as a client, sends a `DataReq` subscription for every Data ID you have mapped in the Signal K UI, and receives repeating `{"Data":[...]}` batches in return. Each value is translated to its standardized, SI-compliant Signal K path and committed to the server's delta stream. When the H5000 supplies a `sysVal` (already in SI units) it is used directly; otherwise the display value is converted using your configured conversion type.
 
 ---
 
@@ -40,7 +40,7 @@ Because every modern sailboat is equipped with a distinct set of sensors (e.g., 
 3. Under the **Custom Sensor Mappings** array section, click **Add Item** for each telemetry channel you want to capture.
 4. Fill out the visual fields:
    * **H5000 Data ID:** The numerical ID discovered using your Dev Tools (e.g., `15` for rudder angle, `42` for forestay).
-   * **Signal K Path:** The official standard path where the metric belongs (e.g., `steering.rudderAngle` or `propulsion.mast.forestayTension`).
+   * **Signal K Path:** The official standard path where the metric belongs (e.g., `steering.rudderAngle`), or a custom path for data the spec does not cover (e.g., `rigging.forestay.tension`).
    * **Unit Conversion Type:** Select the mathematical math-parser translation required. *Note: Signal K strictly enforces SI base metrics internally (Meters per Second for speed, Radians for angles/rotation, and Newtons for rigging tension).*
      * *No Conversion:* Pass-through raw value.
      * *Knots to Meters/Second:* For boat speed or wind speed metrics.
@@ -67,25 +67,18 @@ Use this if Signal K is installed directly on your Raspberry Pi OS application l
    cd ~/.signalk/node_modules/
    ```
 
-3. **Create the plugin directory:**
-   ```bash
-   mkdir signalk-h5000-websocket
-   cd signalk-h5000-websocket
-   ```
-
-4. Clone the repository via Git:
+3. **Clone the repository via Git:**
    ```bash
    git clone https://github.com/theseal666/signalk-h5000-websocket.git
    cd signalk-h5000-websocket
-   
    ```
-   
-6. **Install production dependencies:**
+
+4. **Install production dependencies:**
    ```bash
    npm install --production
    ```
 
-7. **Restart the Signal K Engine:**
+5. **Restart the Signal K Engine:**
    ```bash
    sudo systemctl restart signalk-server
    ```
@@ -138,7 +131,7 @@ docker-compose restart signalk-server
 ## Validation & Troubleshooting
 
 ### Data Browser Verification
-Once configurations are saved and the plugin badge displays an active connection state, navigate to the **Data Browser** in the Signal K side menu. Your custom defined paths (e.g., `propulsion.mast.forestayTension`) will stream cleanly in real-time alongside your native hardware streams, ready to be utilized by dashboard apps (like Kip or InstrumentPanel) or time-series data loggers (like InfluxDB).
+Once configurations are saved and the plugin badge displays an active connection state, navigate to the **Data Browser** in the Signal K side menu. Your custom defined paths (e.g., `rigging.forestay.tension`) will stream cleanly in real-time alongside your native hardware streams, ready to be utilized by dashboard apps (like Kip or InstrumentPanel) or time-series data loggers (like InfluxDB).
 
 ### Inspecting Live Debug Messages
 If variables fail to populate correctly or the connection drops:
