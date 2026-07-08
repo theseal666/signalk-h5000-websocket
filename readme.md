@@ -50,80 +50,22 @@ Because every modern sailboat is equipped with a distinct set of sensors (e.g., 
 
 ---
 
-## Installation & Setup
+## Installation
 
-Choose the installation method that matches your Signal K deployment layout.
+The plugin is published on npm as [`signalk-h5000-websocket`](https://www.npmjs.com/package/signalk-h5000-websocket).
 
-### Option 1: Raw (Bare-Metal) Installation
-Use this if Signal K is installed directly on your Raspberry Pi OS application layer via Node/NPM.
+### Option 1: Signal K Appstore (recommended)
+1. Open your Signal K Admin Portal (`http://<your-pi-ip>:3000`).
+2. Navigate to **Appstore** -> **Available** and search for `signalk-h5000-websocket`.
+3. Click **Install**, then restart the server when prompted.
 
-1. **Access your server:** SSH into your Raspberry Pi.
-   ```bash
-   ssh pi@your-boat-pi.local
-   ```
+### Option 2: npm from the command line
+SSH into your server and install the package into Signal K's configuration directory:
 
-2. **Navigate to the active Signal K configuration directory:**
-   ```bash
-   cd ~/.signalk/node_modules/
-   ```
-
-3. **Clone the repository via Git:**
-   ```bash
-   git clone https://github.com/theseal666/signalk-h5000-websocket.git
-   cd signalk-h5000-websocket
-   ```
-
-4. **Install production dependencies:**
-   ```bash
-   npm install --production
-   ```
-
-5. **Restart the Signal K Engine:**
-   ```bash
-   sudo systemctl restart signalk-server
-   ```
-
----
-
-### Option 2: Signal K inside Docker Installation
-If you run Signal K inside an isolated Docker container (e.g., via the official `signalk/signalk-server` image), plugins must be injected into the host volume folder mapped to the container's persistent `/home/node/.signalk` workspace.
-
-#### Step 1: Locate your host volume mapping
-Examine your container's `docker-compose.yml` configuration to find your persistent data storage path. A standard configuration typically bridges like this:
-
-```yaml
-version: '3.7'
-services:
-  signalk-server:
-    image: signalk/signalk-server:latest
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./signalk-data:/home/node/.signalk
-    restart: unless-stopped
-```
-
-#### Step 2: Create the Plugin Folder on the Host Machine
-1. On your host system, navigate to the persistent volume folder context:
-   ```bash
-   cd /path/to/your/docker-compose/signalk-data/node_modules
-   ```
-2. Build the directory path and paste your code files:
-   ```bash
-   git clone https://github.com/theseal666/signalk-h5000-websocket.git
-   cd signalk-h5000-websocket
-   ```
-
-#### Step 3: Compile Dependencies inside the Container Context
-To maintain architecture and node-version binary compatibility, execute the package dependency installer contextually inside the container layer:
 ```bash
-docker-compose exec signalk-server npm install --prefix /home/node/.signalk/node_modules/signalk-h5000-websocket --production
-```
-
-#### Step 4: Restart the Container Profile
-Breathe changes into the stack by bouncing the runtime service:
-```bash
-docker-compose restart signalk-server
+cd ~/.signalk
+npm install signalk-h5000-websocket
+sudo systemctl restart signalk-server
 ```
 
 ---
