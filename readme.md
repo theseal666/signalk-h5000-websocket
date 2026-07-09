@@ -1,4 +1,5 @@
 # signalk-h5000-websocket
+![signalk-h5000-websocket logo](signalK-B&G-H5000-ingest_logo.png)
 
 A native Signal K server plugin designed to tap into the high-frequency telemetry stream broadcasted by the B&G H5000 CPU via its internal WebSocket interface. 
 
