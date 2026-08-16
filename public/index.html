@@ -225,10 +225,12 @@
           <th>Live Value</th>
           <th>Signal K Path</th>
           <th>Conversion</th>
+          <th>Signal K now</th>
         </tr>
       </thead>
       <tbody id="tbody"></tbody>
     </table>
+    <datalist id="skPathList"></datalist>
 
     <div class="footer-bar">
       <div class="hint" id="footerHint">No scan running yet</div>
@@ -241,12 +243,42 @@
 </div>
 
 <script>
+// A starting point, not a wall — the path field below is a free-text input
+// with this list as autocomplete (a <datalist>), so typing any Signal K
+// path Signal K itself doesn't know about yet still works fine. Grouped
+// roughly by area so it's easier to scan.
 const PATH_OPTIONS = [
-  "", "navigation.speedOverGround", "navigation.speedThroughWater", "navigation.headingMagnetic",
-  "navigation.headingTrue", "navigation.courseOverGroundTrue", "navigation.attitude.pitch",
-  "navigation.attitude.roll", "steering.rudderAngle", "environment.wind.angleApparent",
-  "environment.wind.angleTrueWater", "environment.wind.directionTrue", "environment.wind.speedApparent",
-  "environment.wind.speedTrue", "environment.depth.belowTransducer", "environment.depth.belowKeel"
+  "",
+  // navigation
+  "navigation.speedOverGround", "navigation.speedThroughWater",
+  "navigation.headingMagnetic", "navigation.headingTrue", "navigation.headingCompass",
+  "navigation.courseOverGroundTrue", "navigation.courseOverGroundMagnetic",
+  "navigation.magneticVariation", "navigation.rateOfTurn",
+  "navigation.attitude.pitch", "navigation.attitude.roll", "navigation.attitude.yaw",
+  "navigation.trip.log", "navigation.log",
+  "navigation.position", "navigation.gnss.satellites", "navigation.gnss.antennaAltitude",
+  "navigation.datetime",
+  // racing
+  "navigation.racing.timeToStart", "navigation.racing.distanceStartline",
+  "navigation.racing.startLineStb", "navigation.racing.startLinePort",
+  // performance
+  "performance.velocityMadeGood", "performance.targetSpeed", "performance.polarSpeed",
+  "performance.polarSpeedRatio", "performance.beatAngle", "performance.gybeAngle",
+  "performance.beatAngleVelocityMadeGood", "performance.gybeAngleVelocityMadeGood",
+  "performance.tackMagnetic", "performance.tackTrue", "performance.leeway",
+  // steering
+  "steering.rudderAngle", "steering.autopilot.target.headingMagnetic",
+  "steering.autopilot.target.headingTrue",
+  // wind
+  "environment.wind.angleApparent", "environment.wind.angleTrueWater", "environment.wind.angleTrueGround",
+  "environment.wind.directionTrue", "environment.wind.directionMagnetic",
+  "environment.wind.speedApparent", "environment.wind.speedTrue", "environment.wind.speedOverGround",
+  // depth / water / temp
+  "environment.depth.belowTransducer", "environment.depth.belowKeel", "environment.depth.belowSurface",
+  "environment.water.temperature", "environment.outside.temperature",
+  // electrical (in case rig load / tank / battery channels get mapped)
+  "electrical.batteries.house.voltage", "electrical.batteries.house.current",
+  "tanks.fuel.0.currentLevel", "tanks.freshWater.0.currentLevel"
 ];
 const CONV_OPTIONS = ["none", "speed", "angle", "temperature"];
 
@@ -297,11 +329,6 @@ function fmtVal(v) {
   return Math.abs(v) < 1000 ? v.toFixed(2) : String(v);
 }
 
-function pathOptionsHtml(current) {
-  const opts = PATH_OPTIONS.includes(current) || !current ? PATH_OPTIONS : [current, ...PATH_OPTIONS];
-  return opts.map(p => `<option value="${p}" ${p === current ? 'selected' : ''}>${p || '— unmapped —'}</option>`).join('');
-}
-
 function convOptionsHtml(current) {
   return CONV_OPTIONS.map(c => `<option value="${c}" ${c === current ? 'selected' : ''}>${c}</option>`).join('');
 }
@@ -325,12 +352,13 @@ function buildRow(row) {
     <td><span class="id-badge">${id}</span></td>
     <td><span class="label">${label}</span><br/>${confBadge}</td>
     <td><span class="value-cell">${row.valStr || fmtVal(row.val)}</span></td>
-    <td><select class="path-input" data-id="${id}">${pathOptionsHtml(state.path)}</select></td>
+    <td><input class="path-input" list="skPathList" placeholder="e.g. navigation.rateOfTurn" data-id="${id}" value="${state.path ? state.path.replace(/"/g, '&quot;') : ''}" /></td>
     <td><select class="conv-select" data-id="${id}">${convOptionsHtml(state.conversionType)}</select></td>
+    <td><span class="sk-now-cell" style="color:#6b7c8c;">—</span></td>
   `;
   tr.querySelector('.path-input').addEventListener('change', (e) => {
     rowState[id] = rowState[id] || { conversionType: 'none' };
-    rowState[id].path = e.target.value;
+    rowState[id].path = e.target.value.trim();
   });
   tr.querySelector('.conv-select').addEventListener('change', (e) => {
     rowState[id] = rowState[id] || { path: '' };
@@ -339,17 +367,55 @@ function buildRow(row) {
   return tr;
 }
 
+// Reads Signal K's own current value for a dotted path (e.g.
+// "navigation.headingMagnetic") out of the nested vessels/self document
+// returned by the core REST API. Leaf nodes look like
+// {value, $source, timestamp, ...} — we just want .value.
+function readSkPath(skSelfDoc, dottedPath) {
+  if (!skSelfDoc || !dottedPath) return undefined;
+  let node = skSelfDoc;
+  for (const part of dottedPath.split('.')) {
+    if (node == null) return undefined;
+    node = node[part];
+  }
+  if (node == null) return undefined;
+  return typeof node === 'object' && 'value' in node ? node.value : node;
+}
+
+function fmtSkValue(v) {
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'number') return Math.abs(v) < 1000 ? v.toFixed(3) : String(v);
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+
 // Updates only the value cell + status dot of an existing row. Deliberately
 // never touches the <select> elements — rebuilding them on every poll tick
 // (as the old full-tbody-rebuild version did) discarded whatever the user
 // had open or mid-selection every ~1s, so a dropdown could vanish out from
 // under them while picking an option.
-function updateRowLiveValue(tr, row) {
+function updateRowLiveValue(tr, row, skSelfDoc) {
   const dot = tr.querySelector('.status-dot');
   const valueCell = tr.querySelector('.value-cell');
   const isLive = row.ageMs != null && row.ageMs < 3000;
   if (dot) dot.className = `status-dot ${isLive ? 'live' : 'stale'}`;
   if (valueCell) valueCell.textContent = row.valStr || fmtVal(row.val);
+
+  // Show what Signal K currently has committed for this row's mapped path
+  // — if you've wired up another source for the same path (e.g. the MFD as
+  // a second connector), this is the value that source is feeding, so you
+  // can compare it against the raw H5000 reading in the column to its left
+  // without switching to the Data Browser.
+  const skNowCell = tr.querySelector('.sk-now-cell');
+  if (skNowCell) {
+    const path = rowState[row.id] && rowState[row.id].path;
+    if (!path) {
+      skNowCell.textContent = '—';
+    } else {
+      const skVal = readSkPath(skSelfDoc, path);
+      skNowCell.textContent = fmtSkValue(skVal);
+    }
+  }
 }
 
 // True if the user currently has focus/an open dropdown inside this row —
@@ -388,7 +454,7 @@ function applyFilters(rows) {
   });
 }
 
-function render(rows) {
+function render(rows, skSelfDoc) {
   const filtered = applyFilters(rows).sort((a, b) => {
     const aMapped = savedMappings[a.id] ? 0 : 1;
     const bMapped = savedMappings[b.id] ? 0 : 1;
@@ -422,7 +488,7 @@ function render(rows) {
   filtered.forEach(row => {
     let tr = rowElements.get(row.id);
     if (tr) {
-      updateRowLiveValue(tr, row);
+      updateRowLiveValue(tr, row, skSelfDoc);
     } else {
       tr = buildRow(row);
       rowElements.set(row.id, tr);
@@ -435,14 +501,15 @@ function render(rows) {
       } else {
         tbody.appendChild(tr);
       }
+      updateRowLiveValue(tr, row, skSelfDoc);
     }
     lastNode = tr;
   });
 
   if (filtered.length === 0 && rowElements.size === 0) {
     tbody.innerHTML = rows.length === 0
-      ? '<tr><td colspan="6" style="color:#6b7c8c;">No scan running yet</td></tr>'
-      : '<tr><td colspan="6" style="color:#6b7c8c;">No channels match the current filters</td></tr>';
+      ? '<tr><td colspan="7" style="color:#6b7c8c;">No scan running yet</td></tr>'
+      : '<tr><td colspan="7" style="color:#6b7c8c;">No channels match the current filters</td></tr>';
   }
 
   document.getElementById('liveCount').textContent = rows.length + ' seen';
@@ -452,10 +519,18 @@ function render(rows) {
 
 async function poll() {
   try {
-    const data = await api('api/scan/data');
+    const [data, skSelfDoc] = await Promise.all([
+      api('api/scan/data'),
+      // Signal K's own core REST API — not this plugin's router, so it's
+      // fetched as an absolute path independent of API_BASE. Public,
+      // read-only, no auth needed for local reads. One request per poll
+      // tick gets the whole self document; we pluck values out of it
+      // per-row rather than one request per mapped path.
+      fetch('/signalk/v1/api/vessels/self').then(r => r.ok ? r.json() : null).catch(() => null)
+    ]);
     scanning = data.scanning;
     updateScanUi();
-    render(data.rows);
+    render(data.rows, skSelfDoc);
   } catch (e) {
     // ignore transient errors during polling
   }
@@ -518,6 +593,11 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
 document.getElementById('searchBox').addEventListener('input', () => poll());
 document.getElementById('onlyActive').addEventListener('change', () => poll());
 document.getElementById('onlyUnmapped').addEventListener('change', () => poll());
+
+document.getElementById('skPathList').innerHTML = PATH_OPTIONS
+  .filter(p => p)
+  .map(p => `<option value="${p}"></option>`)
+  .join('');
 
 (async function init() {
   await loadInitial();
