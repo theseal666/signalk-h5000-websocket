@@ -37,9 +37,11 @@ const KNOWN_LABELS = {
   42: 'SpeedThroughWater',
   46: 'AWS (Apparent Wind Speed)',
   47: 'TWS (True Wind Speed)',
+  48: 'Water Temperature (°C)',
   77: 'Depth Below Transducer',
   123: 'Attitude Pitch',
   124: 'Attitude Roll',
+  125: 'Magnetic Variation',
   140: 'AWA (Apparent Wind Angle)',
   141: 'TWA Water (True Wind Angle, water ref)',
   142: 'TWD (True Wind Direction)',
@@ -51,10 +53,10 @@ const KNOWN_LABELS = {
   238: 'Depth (alt 2)',
   240: 'Polar Speed',
   384: 'TWS Correction (calibration factor, not an angle)',
-  309: 'Latitude (candidate)',
-  310: 'Longitude (candidate)',
-  421: 'Latitude (candidate)',
-  422: 'Longitude (candidate)',
+  309: 'Latitude (candidate, ~9m off MFD fix)',
+  310: 'Longitude (candidate, ~9m off MFD fix)',
+  421: 'Latitude (best GPS match, ~2m to MFD fix)',
+  422: 'Longitude (best GPS match, ~2m to MFD fix)',
   497: 'Boat Speed (candidate)'
 };
 
@@ -62,8 +64,23 @@ const CONVERSIONS = {
   none: (v) => v,
   speed: (v) => v * 0.514444, // knots -> m/s
   angle: (v) => v * (Math.PI / 180), // degrees -> radians
-  temperature: (v) => (v - 32) * (5 / 9) + 273.15 // F -> Kelvin
+  temperature: (v) => (v - 32) * (5 / 9) + 273.15, // F -> Kelvin
+  celsius: (v) => v + 273.15, // C -> Kelvin (e.g. ID 48, water temp, confirmed 2026-08-16 against MFD)
+  // H5000 lat/lon Data IDs (e.g. 421/422) are already plain decimal degrees
+  // — no numeric conversion needed. These exist as distinct types (rather
+  // than reusing 'none') purely as a marker: the message handler below
+  // special-cases them to combine a paired lat + lon mapping into a single
+  // navigation.position {latitude, longitude} update, since Signal K
+  // doesn't accept position as two independent numeric deltas.
+  latitude: (v) => v,
+  longitude: (v) => v
 };
+
+// How stale the OTHER half of a lat/lon pair is allowed to be (relative to
+// the update that just arrived) before we still combine them into one
+// position fix. Generous, since the two IDs don't necessarily update on
+// the same tick.
+const POSITION_PAIR_MAX_AGE_MS = 5000;
 
 module.exports = function (app) {
   const plugin = {};
@@ -79,6 +96,11 @@ module.exports = function (app) {
   const scanCache = new Map(); // id -> { val, sysVal, valStr, valid, lastSeen }
   let scanActive = false;
   let scanEndsAt = null;
+  // path -> { lat: {value, ts}, lon: {value, ts} } — half-built position
+  // fixes waiting for their other half before they can be sent as one
+  // navigation.position update. Keyed by path so more than one compound
+  // position mapping (e.g. a second GPS source) could coexist.
+  const positionCache = new Map();
 
   function log(...args) {
     app.debug('[h5000]', ...args);
@@ -94,6 +116,7 @@ module.exports = function (app) {
       try { mappedSocket.terminate(); } catch (e) { /* ignore */ }
       mappedSocket = null;
     }
+    positionCache.clear();
 
     const ids = (config.sensorMappings || []).map((m) => m.dataId);
     if (ids.length === 0) {
@@ -138,6 +161,32 @@ module.exports = function (app) {
         // conversionType was correct in every case we tested, so we stop
         // trusting sysVal entirely.
         const skValue = convertValue(item.val, mapping.conversionType);
+
+        // latitude/longitude mappings don't get sent as their own delta —
+        // Signal K's navigation.position is one atomic {latitude, longitude}
+        // value, not two independent numbers. Cache this half and only emit
+        // once the other half has also arrived recently enough to trust
+        // pairing them together as a single fix.
+        if (mapping.conversionType === 'latitude' || mapping.conversionType === 'longitude') {
+          const entry = positionCache.get(mapping.path) || {};
+          const now = Date.now();
+          if (mapping.conversionType === 'latitude') entry.lat = { value: skValue, ts: now };
+          else entry.lon = { value: skValue, ts: now };
+          positionCache.set(mapping.path, entry);
+
+          if (entry.lat && entry.lon && Math.abs(entry.lat.ts - entry.lon.ts) <= POSITION_PAIR_MAX_AGE_MS) {
+            app.handleMessage(plugin.id, {
+              updates: [
+                {
+                  source: { label: plugin.id },
+                  timestamp: new Date().toISOString(),
+                  values: [{ path: mapping.path, value: { latitude: entry.lat.value, longitude: entry.lon.value } }]
+                }
+              ]
+            });
+          }
+          continue;
+        }
 
         app.handleMessage(plugin.id, {
           updates: [
@@ -262,7 +311,7 @@ module.exports = function (app) {
             conversionType: {
               type: 'string',
               title: 'Conversion',
-              enum: ['none', 'speed', 'angle', 'temperature'],
+              enum: ['none', 'speed', 'angle', 'temperature', 'celsius', 'latitude', 'longitude'],
               default: 'none'
             }
           }

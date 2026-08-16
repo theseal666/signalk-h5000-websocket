@@ -1,78 +1,49 @@
 # signalk-h5000-websocket
-![signalk-h5000-websocket logo](signalK-B&G-H5000-ingest_logo.png)
 
-A native Signal K server plugin designed to tap into the high-frequency telemetry stream broadcasted by the B&G H5000 CPU via its internal WebSocket interface.
+Bridges a B&G H5000 CPU's GoFree Data Service WebSocket (`ws://<ip>:2053`) into Signal K, with a built-in **live discovery/mapping UI** so channels can be identified and mapped from the boat by eye — compare a live-ticking value against the plotter, pick a Signal K path, save.
 
-By pulling data directly from the H5000 web server over Ethernet, this plugin bypasses NMEA 2000 gateway bottlenecks, allowing high-frequency metrics (like Wind Speed, Angle, Boat Speed, and Heel) to flow seamlessly into your Signal K data core for logging, instrumentation, or polar calculation.
+## What changed in 2.0.0
 
----
+- **Fixed the `sysVal` bug.** Earlier versions trusted `sysVal` as "already SI" when present. Live testing on 2026-08-16 showed this is unreliable across several channel types (depth in feet instead of meters, wind/speed channels duplicating `val` unconverted, some angle channels duplicating `val` in degrees instead of radians). The plugin now always converts `val` using the configured `conversionType` and never reads `sysVal`.
+- **Added a live mapping UI**, served at the plugin's own page (`/plugins/signalk-h5000-websocket/` under your Signal K server, or reachable via the "Webapps" menu). It:
+  - Opens a short-lived, separate WebSocket scan (default IDs 0–599, default 5-minute window) that does **not** touch your live Signal K data — it's purely for discovery.
+  - Shows every ID currently broadcasting, with a live-updating value, a known vendor label where we've confirmed one, and a Signal K path / conversion-type dropdown per row.
+  - Lets you save directly from the browser — no manual JSON editing, no SSH needed. Saving updates the plugin config and reconnects the "production" WebSocket connection (the one that actually feeds Signal K) with the new mapping list, without needing a full Signal K restart.
+- The original config screen (IP/port/raw mapping array) still exists as a fallback under Signal K's standard "Plugin Config" screen, but the live UI is the recommended way to edit mappings.
 
-## What's new in 2.0.0
+## Mapping GPS position (lat/lon)
 
-- **Fixed a `sysVal` unit-inconsistency bug.** Earlier versions used `sysVal` directly whenever the H5000 supplied it, on the assumption it was always pre-converted to SI. Live testing on 2026-08-16 showed this is unreliable: depth channels report `sysVal` in feet (not meters), wind/boat-speed channels report `sysVal` as an unconverted duplicate of `val` (still knots), and some angle-like channels report `sysVal` as an unconverted duplicate of `val` (still degrees, not radians). The plugin now always converts `val` using the configured conversion type and no longer reads `sysVal` at all.
-- **Added a live discovery/mapping UI**, served at the plugin's own page (`/plugins/signalk-h5000-websocket/` on your Signal K server, also reachable from the **Webapps** menu). It opens a short-lived, separate WebSocket scan (doesn't touch your live Signal K data) so you can watch every broadcasting ID tick in real time, compare it against the plotter, and map a Signal K path + conversion type per row with a dropdown — no Dev Tools, no manual JSON editing, no SSH required. Saving reconnects the production feed with the new mapping immediately.
-- The classic Dev Tools discovery workflow described below still works and is a fine fallback, but the live UI is now the recommended way to map channels.
+Signal K's `navigation.position` is one atomic `{latitude, longitude}` value, but the H5000 broadcasts latitude and longitude as two separate Data IDs. To map them, create two mappings pointing at the **same** path (typically `navigation.position`), using the special `latitude` / `longitude` conversion types instead of `angle`/`speed`/etc:
 
----
+| Data ID | Signal K Path | Conversion |
+|---|---|---|
+| 421 (or your confirmed lat ID) | navigation.position | latitude |
+| 422 (or your confirmed lon ID) | navigation.position | longitude |
 
-## Architecture Overview
+The plugin caches whichever half arrives first and only emits a combined position update once the other half has also arrived within the last 5 seconds — so a stale reading from one ID never gets paired with a fresh one from the other. Regular numeric mappings are unaffected by this; only `latitude`/`longitude` conversion types trigger the pairing behavior.
 
+## Installing on the Pi
+
+```bash
+cd ~/.signalk
+npm install signalk-h5000-websocket@latest
+sudo systemctl restart signalk
 ```
- +-------------------------+               +-----------------------------------+
- |  B&G H5000 CPU          |               | Raspberry Pi (or Boat Server)     |
- |  Web Server             |               |                                   |
- |                         |               |  +-----------------------------+  |
- |  [WS Stream: Port 2053] |=============> |  | Signal K Server              |  |
- +-------------------------+   Ethernet/   |  | (Plugin: signalk-h5000-ws)  |  |
-                               Wi-Fi       |  +-----------------------------+  |
-                                           +-----------------------------------+
-```
 
-The B&G H5000 CPU exposes its internal data dictionary through Navico's GoFree Data Service on WebSocket port `2053`. The service is subscription-based: this plugin connects as a client, sends a `DataReq` subscription for every Data ID you have mapped in the Signal K UI, and receives repeating `{"Data":[...]}` batches in return. Each value's `val` field is converted to its standardized, SI-compliant Signal K path using your configured conversion type. **Note:** earlier versions of this plugin used `sysVal` directly when present, assuming it was already SI — this was found to be unreliable (see "What's new in 2.0.0" above) and is no longer used.
+(Or install via the Signal K admin UI's Appstore once published to npm.)
 
----
+## Using the live mapping UI
 
-## Sensor Discovery & UI Configuration Workflow
-
-### Recommended: the built-in Live Mapping UI (2.0.0+)
-
-1. Open Signal K's admin UI and go to **Webapps**, or navigate directly to `http://<your-pi-ip>:3000/plugins/signalk-h5000-websocket/`.
+1. Open Signal K's admin UI → **Webapps** (or navigate directly to `http://<pi-ip>:3000/plugins/signalk-h5000-websocket/`).
 2. Confirm the H5000 IP/port at the top and click **Start scan**.
-3. Watch values tick in live. Cross-check against the plotters/mast displays to identify what you're looking at.
-4. Pick a Signal K path and conversion type from the dropdowns for each channel you've confirmed.
-5. Click **Save Mappings** — the plugin reconnects its production feed with the new mapping immediately.
-6. Click **Stop scan** when done, or let the scan window expire (default 5 minutes) — it always auto-stops so it never runs indefinitely.
-
-### Fallback: Discover Data IDs via Browser Developer Tools
-
-Because every modern sailboat is equipped with a distinct set of sensors (e.g., custom linear rudder feedback, forestay load cells, mast rotation, or tank gauges), the H5000 maps variables dynamically based on how your network was commissioned.
-
-1. Connect a laptop or nav-station computer to the boat's network and navigate to the H5000 web interface (`http://<YOUR_H5000_IP>`).
-2. Press **F12** (or Right-Click -> *Inspect*) to open your browser's Developer Tools.
-3. Select the **Network** tab, click the **WS** (WebSockets) filter sub-tab, and reload the page.
-4. Click on the active connection (typically ending in `:2053`) and select its **Messages** or **Frames** tab.
-5. You will see a live, high-frequency waterfall stream of JSON packets. Actuate your target sensor (e.g., move the rudder wheel or crank the forestay tension) and note which `DataId` updates its value in real-time.
-
-### Input Mappings Visually into Signal K (standard config screen, always available)
-
-1. Open your Signal K Admin Portal (`http://<your-pi-ip>:3000`).
-2. Navigate to **Server** -> **Plugin Config** and select **B&G H5000 WebSocket Ingest** from the list.
-3. Under the **Custom Sensor Mappings** array section, click **Add Item** for each telemetry channel you want to capture.
-4. Fill out the visual fields:
-   * **H5000 Data ID:** The numerical ID discovered using the live UI or your Dev Tools (e.g., `41` for SOG, `42` for STW).
-   * **Signal K Path:** The official standard path where the metric belongs (e.g., `steering.rudderAngle`), or a custom path for data the spec does not cover (e.g., `rigging.forestay.tension`).
-   * **Unit Conversion Type:** Select the mathematical translation required. *Note: Signal K strictly enforces SI base metrics internally (Meters per Second for speed, Radians for angles/rotation, and Newtons for rigging tension).*
-     * *None:* Pass-through raw value.
-     * *Speed:* Knots to Meters/Second.
-     * *Angle:* Degrees to Radians.
-     * *Temperature:* Fahrenheit to Kelvin.
-5. Click **Submit**. The plugin will instantly reload, compile your mapping dictionary, and begin feeding the standard data streams.
-
----
+3. Watch values tick in. Cross-check against the plotters/mast displays for whatever you're trying to identify (course, wind angle, boat speed, etc.).
+4. Once you've confirmed an ID, pick its Signal K path and conversion type from the dropdowns in that row.
+5. Click **Save Mappings**. The plugin reconnects its production WebSocket with the new mapping list immediately.
+6. Click **Stop scan** when you're done (or just let the scan window expire — it auto-stops after the configured duration so it doesn't run indefinitely).
 
 ## Confirmed mappings (as of 2026-08-16)
 
-See `troubleshoot.md` for the full investigation history. Current best-known set:
+See `troubleshoot.md` for the full history. Current best-known set:
 
 | Data ID | Signal K Path | Conversion |
 |---|---|---|
@@ -87,42 +58,10 @@ See `troubleshoot.md` for the full investigation history. Current best-known set
 | 47 | environment.wind.speedTrue | speed |
 | 77 | environment.depth.belowTransducer | none |
 
-Note: 123 (AttitudePitch) / 124 (AttitudeRoll) are the vendor-correct Data IDs for pitch/roll but were confirmed **not** to actually broadcast from this particular H5000 unit — pitch/roll are sourced from a separate IMU (racebox) plugin instead.
+Note: 123 (AttitudePitch) / 124 (AttitudeRoll) are the vendor-correct IDs for pitch/roll but were confirmed **not** to actually broadcast from this particular H5000 unit — pitch/roll are sourced from a separate IMU (racebox) plugin instead.
 
----
+## Protocol notes
 
-## Installation
-
-The plugin is published on npm as [`signalk-h5000-websocket`](https://www.npmjs.com/package/signalk-h5000-websocket).
-
-### Option 1: Signal K Appstore (recommended)
-1. Open your Signal K Admin Portal (`http://<your-pi-ip>:3000`).
-2. Navigate to **Appstore** -> **Available** and search for `signalk-h5000-websocket`.
-3. Click **Install**, then restart the server when prompted.
-
-### Option 2: npm from the command line
-SSH into your server and install the package into Signal K's configuration directory:
-
-```bash
-cd ~/.signalk
-npm install signalk-h5000-websocket
-sudo systemctl restart signalk-server
-```
-
----
-
-## Validation & Troubleshooting
-
-### Data Browser Verification
-Once configurations are saved and the plugin badge displays an active connection state, navigate to the **Data Browser** in the Signal K side menu. Your custom defined paths (e.g., `rigging.forestay.tension`) will stream cleanly in real-time alongside your native hardware streams, ready to be utilized by dashboard apps (like Kip or InstrumentPanel) or time-series data loggers (like InfluxDB).
-
-### Inspecting Live Debug Messages
-If variables fail to populate correctly or the connection drops:
-1. Navigate to **Server** -> **Debug Log** within the Signal K Web UI.
-2. Put `signalk-h5000-websocket` in the search box to filter low-level logging messages.
-3. You will see detailed real-time traces tracking web socket server connections, connection retries, parsing validations, and missing ID warnings.
-
-### Protocol notes
 - Client → server: `{"DataReq":[{"id":N,"repeat":true,"inst":0}]}`
 - Server → client: `{"Data":[{id, val, sysVal, valStr, valid, damped, dampedVal}, ...]}`
-- `sysVal` is not reliably SI-converted — the plugin no longer uses it (see "What's new in 2.0.0").
+- `sysVal` is not reliably SI-converted — do not use it (see above).

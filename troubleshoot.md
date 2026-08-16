@@ -61,7 +61,20 @@ Earlier candidates 505 (heel) and 384 (pitch) were **statistically-guessed, not 
 - Temperature channel isolation — not yet attempted.
 - GPS coordinate source: narrowed to 309/310 or 421/422 as live sources; 340/341 and 352/353 look static (waypoint/anchor) — pick one pair for `navigation.position`.
 - IDs 355–361 (timer-related, unresolved).
-- Trip/total log distance channel — unresolved.
+- Trip/total log distance channel — still unresolved (MFD's `navigation.trip.log` reads 0 at the dock, so there's no nonzero ground truth to correlate against yet — revisit once underway).
+
+## Confirmed via MFD cross-check (2026-08-16)
+
+A second connector (the boat's MFD, NMEA-fed) was added to Signal K, which gives independent ground-truth values for several paths. Cross-checking unmapped H5000 IDs against those MFD-sourced values confirmed two more channels:
+
+| Data ID | Signal K Path | Conversion | Notes |
+|---|---|---|---|
+| 48 | environment.water.temperature | celsius (new conversion type, added 2026-08-16) | H5000 raw 18.77°C vs MFD 18.7°C — near-exact match. Raw value is already Celsius, not Fahrenheit, so the existing `temperature` conversion (F→K) would have been wrong; added a dedicated `celsius` conversion (C→K) instead. |
+| 125 | navigation.magneticVariation | angle | H5000 raw 5.26° vs MFD 5.2° (0.0918 rad vs 0.0908 rad) — near-exact match. |
+
+Also resolved the long-standing GPS-source ambiguity: 421/422 (lat/lon) matches the MFD's fix within ~2-3m and is the better source; 309/310 is ~9m off (secondary/stale fix); 340/341 and 352/353 are confirmed **not** live GPS — they sit ~40km away from the boat's actual position, consistent with being a static waypoint or anchor mark.
+
+**Known limitation:** `navigation.position` needs both latitude and longitude combined into one Signal K update, but this plugin maps each H5000 Data ID to one Signal K value independently — there's no mechanism yet to pair two IDs (e.g. 421 + 422) into a single compound update. Mapping live GPS position through this plugin would need a small architecture change; not done yet.
 
 ## Plugin rewrite (v2.0.0)
 
