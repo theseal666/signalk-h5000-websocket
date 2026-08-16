@@ -359,12 +359,26 @@ function rowIsActive(tr) {
   return tr.contains(document.activeElement) && document.activeElement !== document.body;
 }
 
+// H5000 channels don't arrive on a perfectly steady 1s cadence, so a row's
+// ageMs jitters back and forth across the "live" 3000ms cutoff from one
+// poll to the next even for a channel broadcasting completely normally.
+// Filtering strictly on that instantaneous value made rows constantly pop
+// in and out of the "only active" view, which reshuffled the whole table
+// every tick and made it impossible to click the row you wanted. Once a
+// row has been seen live during this scan, it stays in the list — the
+// status dot still tells you if it's live right now — until a fresh scan
+// starts.
+const seenActiveIds = new Set();
+
 function applyFilters(rows) {
   const q = document.getElementById('searchBox').value.toLowerCase();
   const onlyActive = document.getElementById('onlyActive').checked;
   const onlyUnmapped = document.getElementById('onlyUnmapped').checked;
+  rows.forEach(r => {
+    if (r.ageMs != null && r.ageMs < 3000) seenActiveIds.add(r.id);
+  });
   return rows.filter(r => {
-    if (onlyActive && !(r.ageMs != null && r.ageMs < 3000)) return false;
+    if (onlyActive && !seenActiveIds.has(r.id)) return false;
     if (onlyUnmapped && savedMappings[r.id]) return false;
     if (q) {
       const label = (labels[r.id] || '').toLowerCase();
@@ -471,6 +485,11 @@ scanBtn.addEventListener('click', async () => {
     body: JSON.stringify({ sensorMappings: Object.entries(savedMappings).map(([id, m]) => ({ dataId: Number(id), path: m.path, conversionType: m.conversionType })), ipAddress, port })
   });
   await api('api/scan/start', { method: 'POST', body: JSON.stringify({ minId: 0, maxId: 599, durationMs: minutes * 60 * 1000 }) });
+  // Fresh scan — forget which rows were seen live before so the table
+  // starts clean instead of keeping rows from a previous scan around.
+  seenActiveIds.clear();
+  for (const tr of rowElements.values()) tr.remove();
+  rowElements.clear();
   scanning = true;
   updateScanUi();
   if (!pollTimer) pollTimer = setInterval(poll, 1000);
