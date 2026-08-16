@@ -294,6 +294,8 @@ function convOptionsHtml(current) {
   return CONV_OPTIONS.map(c => `<option value="${c}" ${c === current ? 'selected' : ''}>${c}</option>`).join('');
 }
 
+const rowElements = new Map(); // id -> tr, kept alive across polls so open dropdowns survive
+
 function buildRow(row) {
   const id = row.id;
   const state = rowState[id] || { path: '', conversionType: 'none' };
@@ -325,6 +327,26 @@ function buildRow(row) {
   return tr;
 }
 
+// Updates only the value cell + status dot of an existing row. Deliberately
+// never touches the <select> elements — rebuilding them on every poll tick
+// (as the old full-tbody-rebuild version did) discarded whatever the user
+// had open or mid-selection every ~1s, so a dropdown could vanish out from
+// under them while picking an option.
+function updateRowLiveValue(tr, row) {
+  const dot = tr.querySelector('.status-dot');
+  const valueCell = tr.querySelector('.value-cell');
+  const isLive = row.ageMs != null && row.ageMs < 3000;
+  if (dot) dot.className = `status-dot ${isLive ? 'live' : 'stale'}`;
+  if (valueCell) valueCell.textContent = row.valStr || fmtVal(row.val);
+}
+
+// True if the user currently has focus/an open dropdown inside this row —
+// used to avoid yanking a row out of the DOM (e.g. because it aged out of
+// the "only active" filter) while they're mid-interaction with it.
+function rowIsActive(tr) {
+  return tr.contains(document.activeElement) && document.activeElement !== document.body;
+}
+
 function applyFilters(rows) {
   const q = document.getElementById('searchBox').value.toLowerCase();
   const onlyActive = document.getElementById('onlyActive').checked;
@@ -347,15 +369,55 @@ function render(rows) {
     if (aMapped !== bMapped) return aMapped - bMapped;
     return a.id - b.id;
   });
+  const filteredIds = new Set(filtered.map(r => String(r.id)));
 
-  const existingIds = new Set(Array.from(tbody.children).map(tr => tr.dataset.id));
-  const newIds = new Set(filtered.map(r => String(r.id)));
+  // Drop rows that fell out of the current filter/scan — but never a row
+  // the user is actively interacting with (focused input/open dropdown),
+  // even if e.g. it just aged past the "only active" cutoff.
+  for (const [id, tr] of Array.from(rowElements.entries())) {
+    if (!filteredIds.has(String(id)) && !rowIsActive(tr)) {
+      tr.remove();
+      rowElements.delete(id);
+    }
+  }
 
-  tbody.innerHTML = '';
+  // Clear the "no data yet" placeholder row (it has no data-id) once real
+  // rows start arriving.
+  if (filtered.length > 0) {
+    const placeholder = tbody.querySelector('tr:not([data-id])');
+    if (placeholder) placeholder.remove();
+  }
+
+  // Update existing rows in place (value + status dot only) and insert any
+  // genuinely new rows at their sorted position. Existing rows are never
+  // removed and re-created, and never reordered, so an open <select> stays
+  // exactly as the user left it.
+  let lastNode = null;
   filtered.forEach(row => {
-    const tr = buildRow(row);
-    tbody.appendChild(tr);
+    let tr = rowElements.get(row.id);
+    if (tr) {
+      updateRowLiveValue(tr, row);
+    } else {
+      tr = buildRow(row);
+      rowElements.set(row.id, tr);
+      if (lastNode && lastNode.nextSibling) {
+        tbody.insertBefore(tr, lastNode.nextSibling);
+      } else if (lastNode) {
+        tbody.appendChild(tr);
+      } else if (tbody.firstChild) {
+        tbody.insertBefore(tr, tbody.firstChild);
+      } else {
+        tbody.appendChild(tr);
+      }
+    }
+    lastNode = tr;
   });
+
+  if (filtered.length === 0 && rowElements.size === 0) {
+    tbody.innerHTML = rows.length === 0
+      ? '<tr><td colspan="6" style="color:#6b7c8c;">No scan running yet</td></tr>'
+      : '<tr><td colspan="6" style="color:#6b7c8c;">No channels match the current filters</td></tr>';
+  }
 
   document.getElementById('liveCount').textContent = rows.length + ' seen';
   const mappedCount = Object.keys(savedMappings).length;
