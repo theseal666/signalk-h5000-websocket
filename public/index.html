@@ -263,15 +263,27 @@ const stopBtn = document.getElementById("stopBtn");
 const footerHint = document.getElementById("footerHint");
 const saveMsg = document.getElementById("saveMsg");
 
+// This page is reachable from two different URLs on the Signal K server:
+//   /plugins/signalk-h5000-websocket/index.html  (served by the plugin's own
+//     router — this is where the API below actually lives too)
+//   /signalk-h5000-websocket/  (served by Signal K's generic "webapp" static
+//     hosting, because of the signalk-webapp keyword in package.json — pure
+//     static file serving, with no connection to the plugin's router at all)
+// Relative fetches like "./api/..." resolve differently depending on which
+// of those two URLs loaded the page, and only one of them actually has the
+// API behind it — so every request from the other entry point 404s. Always
+// hitting the API by its real absolute path makes both entry points work.
+const API_BASE = '/plugins/signalk-h5000-websocket/';
+
 async function api(path, opts) {
-  const res = await fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts));
+  const res = await fetch(API_BASE + path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts));
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
 async function loadInitial() {
-  labels = await api('./api/labels');
-  const cfg = await api('./api/config');
+  labels = await api('api/labels');
+  const cfg = await api('api/config');
   document.getElementById('ipAddress').value = cfg.ipAddress || '';
   document.getElementById('port').value = cfg.port || '';
   savedMappings = {};
@@ -426,7 +438,7 @@ function render(rows) {
 
 async function poll() {
   try {
-    const data = await api('./api/scan/data');
+    const data = await api('api/scan/data');
     scanning = data.scanning;
     updateScanUi();
     render(data.rows);
@@ -454,18 +466,18 @@ scanBtn.addEventListener('click', async () => {
   const port = Number(document.getElementById('port').value);
   const minutes = Number(document.getElementById('scanMinutes').value) || 5;
   // Save connection settings first so the plugin knows where to scan.
-  await api('./api/config', {
+  await api('api/config', {
     method: 'POST',
     body: JSON.stringify({ sensorMappings: Object.entries(savedMappings).map(([id, m]) => ({ dataId: Number(id), path: m.path, conversionType: m.conversionType })), ipAddress, port })
   });
-  await api('./api/scan/start', { method: 'POST', body: JSON.stringify({ minId: 0, maxId: 599, durationMs: minutes * 60 * 1000 }) });
+  await api('api/scan/start', { method: 'POST', body: JSON.stringify({ minId: 0, maxId: 599, durationMs: minutes * 60 * 1000 }) });
   scanning = true;
   updateScanUi();
   if (!pollTimer) pollTimer = setInterval(poll, 1000);
 });
 
 stopBtn.addEventListener('click', async () => {
-  await api('./api/scan/stop', { method: 'POST' });
+  await api('api/scan/stop', { method: 'POST' });
   scanning = false;
   updateScanUi();
 });
@@ -476,7 +488,7 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
   const mappings = Object.entries(rowState)
     .filter(([id, m]) => m.path)
     .map(([id, m]) => ({ dataId: Number(id), path: m.path, conversionType: m.conversionType || 'none' }));
-  await api('./api/config', { method: 'POST', body: JSON.stringify({ ipAddress, port, sensorMappings: mappings }) });
+  await api('api/config', { method: 'POST', body: JSON.stringify({ ipAddress, port, sensorMappings: mappings }) });
   savedMappings = {};
   mappings.forEach(m => { savedMappings[m.dataId] = { path: m.path, conversionType: m.conversionType }; });
   saveMsg.classList.add('show');
