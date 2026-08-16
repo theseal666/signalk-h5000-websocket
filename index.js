@@ -201,8 +201,17 @@ module.exports = function (app) {
     });
 
     socket.on('close', () => {
+      // If this isn't the currently-active socket, it's a stale one we
+      // ourselves just .terminate()'d (e.g. because a new config was saved
+      // or a reconnect already replaced it). Its belated 'close' event
+      // must NOT schedule another reconnect — otherwise every reconnect
+      // (including a normal config save) spawns a second reconnect timer
+      // that later terminates the perfectly healthy new socket, which
+      // spawns another, forever: a permanent ~5s open/close/reconnect
+      // loop that looks like a network problem but isn't one.
+      if (mappedSocket !== socket) return;
       log('mapped socket closed, will reconnect in 5s');
-      if (mappedSocket === socket) mappedSocket = null;
+      mappedSocket = null;
       clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(() => connectMappedSocket(currentConfig), 5000);
     });
