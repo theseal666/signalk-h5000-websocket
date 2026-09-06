@@ -18,6 +18,16 @@
  *      Signal K server's router. It is closed automatically after the
  *      requested scan window (default 5 minutes) or when explicitly
  *      stopped, so it never runs forever in the background.
+ *
+ *      Alongside the latest-value cache, every scan also keeps a bounded
+ *      timestamped history per ID (see scanHistory / MAX_HISTORY_SAMPLES
+ *      below). That's what backs the "record & compare" workflow in the
+ *      UI: start a scan, do a deliberate test movement (e.g. oscillate the
+ *      wheel/rudder a known amount), then sort channels by how much they
+ *      actually moved (range) or how often they crossed zero (sign
+ *      changes) instead of eyeballing raw numbers — and open a channel's
+ *      sparkline to see its shape over the test window before mapping it.
+ *      This replaces what used to require a one-off SSH script per test.
  */
 
 const WebSocket = require('ws');
@@ -45,7 +55,7 @@ const KNOWN_LABELS = {
   140: 'AWA (Apparent Wind Angle)',
   141: 'TWA Water (True Wind Angle, water ref)',
   142: 'TWD (True Wind Direction)',
-  146: 'Rudder Angle',
+  146: 'Rudder Angle (confirmed via oscillation test, 2026-09-06)',
   150: 'Rudder Angle (alt)',
   165: 'Depth (alt)',
   228: 'Target True Wind Angle',
@@ -82,6 +92,13 @@ const CONVERSIONS = {
 // the same tick.
 const POSITION_PAIR_MAX_AGE_MS = 5000;
 
+// Cap on how many timestamped samples we keep per Data ID during a scan.
+// Bounds memory on a long scan window even if every one of the ~600 IDs is
+// broadcasting the whole time — older samples are dropped FIFO once a
+// channel exceeds this. Comfortably more than enough for a short deliberate
+// test movement (tens of seconds to a couple of minutes).
+const MAX_HISTORY_SAMPLES = 2000;
+
 module.exports = function (app) {
   const plugin = {};
   plugin.id = 'signalk-h5000-websocket';
@@ -94,6 +111,7 @@ module.exports = function (app) {
   let reconnectTimer = null;
   let currentConfig = {};
   const scanCache = new Map(); // id -> { val, sysVal, valStr, valid, lastSeen }
+  let scanHistory = new Map(); // id -> [{t, v}], reset at the start of each scan
   let scanActive = false;
   let scanEndsAt = null;
   // path -> { lat: {value, ts}, lon: {value, ts} } — half-built position
@@ -109,6 +127,32 @@ module.exports = function (app) {
   function convertValue(val, type) {
     const fn = CONVERSIONS[type] || CONVERSIONS.none;
     return fn(val);
+  }
+
+  // Summarizes a channel's recorded history for the current scan: how far
+  // it swung (range), whether it oscillated across zero (signChanges,
+  // useful for hunting things like rudder/heel that should center on 0),
+  // and a mean. Returns null if there isn't enough history yet to say
+  // anything meaningful.
+  function computeStats(hist) {
+    if (!hist || hist.length < 2) return null;
+    let min = Infinity;
+    let max = -Infinity;
+    let sum = 0;
+    let signChanges = 0;
+    let prev = null;
+    let n = 0;
+    for (const sample of hist) {
+      if (typeof sample.v !== 'number') continue;
+      if (sample.v < min) min = sample.v;
+      if (sample.v > max) max = sample.v;
+      sum += sample.v;
+      if (prev !== null && ((prev > 0 && sample.v < 0) || (prev < 0 && sample.v > 0))) signChanges++;
+      prev = sample.v;
+      n++;
+    }
+    if (n < 2) return null;
+    return { min, max, range: max - min, mean: sum / n, signChanges, n };
   }
 
   function connectMappedSocket(config) {
@@ -231,11 +275,16 @@ module.exports = function (app) {
     scanTimer = null;
     scanActive = false;
     scanEndsAt = null;
+    // Deliberately NOT clearing scanCache/scanHistory here — a scan that
+    // just ended (auto-timeout or explicit Stop) is exactly when you want
+    // to go look at what was recorded. History is only reset when the
+    // NEXT scan starts.
   }
 
   function startScan(config, { minId = 0, maxId = 599, durationMs = 5 * 60 * 1000 } = {}) {
     stopScan();
     scanCache.clear();
+    scanHistory = new Map();
 
     const url = `ws://${config.ipAddress}:${config.port}`;
     log('starting discovery scan', url, `IDs ${minId}-${maxId}`, `${durationMs}ms`);
@@ -259,14 +308,25 @@ module.exports = function (app) {
         return;
       }
       if (!msg.Data) return;
+      const now = Date.now();
       for (const item of msg.Data) {
         scanCache.set(item.id, {
           val: item.val,
           sysVal: item.sysVal,
           valStr: item.valStr,
           valid: item.valid,
-          lastSeen: Date.now()
+          lastSeen: now
         });
+
+        if (typeof item.val === 'number') {
+          let hist = scanHistory.get(item.id);
+          if (!hist) {
+            hist = [];
+            scanHistory.set(item.id, hist);
+          }
+          hist.push({ t: now, v: item.val });
+          if (hist.length > MAX_HISTORY_SAMPLES) hist.shift();
+        }
       }
     });
 
@@ -382,6 +442,7 @@ module.exports = function (app) {
     router.get('/api/scan/data', (req, res) => {
       const rows = [];
       for (const [id, data] of scanCache.entries()) {
+        const stats = computeStats(scanHistory.get(id));
         rows.push({
           id,
           label: KNOWN_LABELS[id] || null,
@@ -389,7 +450,10 @@ module.exports = function (app) {
           sysVal: data.sysVal,
           valStr: data.valStr,
           valid: data.valid,
-          ageMs: Date.now() - data.lastSeen
+          ageMs: Date.now() - data.lastSeen,
+          range: stats ? stats.range : null,
+          signChanges: stats ? stats.signChanges : null,
+          historyCount: stats ? stats.n : 0
         });
       }
       rows.sort((a, b) => a.id - b.id);
@@ -399,6 +463,19 @@ module.exports = function (app) {
         count: rows.length,
         rows
       });
+    });
+
+    // Full timestamped history for a single Data ID from the current (or
+    // most recently finished) scan, plus its summary stats. This is what
+    // the UI's per-row "chart" button pulls to draw a sparkline and let
+    // you visually match a channel's shape against whatever test movement
+    // you just did — the same thing as pulling a raw WebSocket capture by
+    // hand over SSH, just built into the plugin.
+    router.get('/api/scan/history/:id', (req, res) => {
+      const id = Number(req.params.id);
+      const hist = scanHistory.get(id) || [];
+      const stats = computeStats(hist);
+      res.json({ id, points: hist, stats });
     });
   };
 

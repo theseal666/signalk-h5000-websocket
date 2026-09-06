@@ -212,8 +212,18 @@
       <input type="search" id="searchBox" placeholder="Search by ID or label…" />
       <label class="toggle-wrap"><input type="checkbox" id="onlyActive" checked /> Only channels updating right now</label>
       <label class="toggle-wrap"><input type="checkbox" id="onlyUnmapped" /> Only unmapped</label>
+      <select id="sortMode" style="width:190px;">
+        <option value="id">Sort: Data ID</option>
+        <option value="range">Sort: Most active (range)</option>
+        <option value="signChanges">Sort: Most oscillating</option>
+      </select>
       <div class="spacer"></div>
       <span class="toggle-wrap">Compare against the plotter, then map and save</span>
+    </div>
+    <div class="toolbar" style="margin-top:-6px;">
+      <span class="toggle-wrap" style="color:#33475b;">
+        <b>Can't tell which ID is right?</b>&nbsp;Start a scan, do a deliberate test move (e.g. oscillate the wheel/rudder a known amount a few times), then switch the sort above to "Most active" or "Most oscillating" — the channel that actually reacted will float to the top. Click 📈 on any row to see its shape over the scan and compare amplitude/timing directly.
+      </span>
     </div>
 
     <table>
@@ -223,6 +233,8 @@
           <th>ID</th>
           <th>Label</th>
           <th>Live Value</th>
+          <th>Range</th>
+          <th>Chart</th>
           <th>Signal K Path</th>
           <th>Conversion</th>
           <th>Signal K now</th>
@@ -352,6 +364,8 @@ function buildRow(row) {
     <td><span class="id-badge">${id}</span></td>
     <td><span class="label">${label}</span><br/>${confBadge}</td>
     <td><span class="value-cell">${row.valStr || fmtVal(row.val)}</span></td>
+    <td><span class="range-cell" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace;color:#33475b;">—</span></td>
+    <td><button type="button" class="btn btn-ghost chart-btn" data-id="${id}" style="padding:3px 8px;font-size:12px;" title="View this channel's shape over the scan">📈</button></td>
     <td><input class="path-input" list="skPathList" placeholder="e.g. navigation.rateOfTurn" data-id="${id}" value="${state.path ? state.path.replace(/"/g, '&quot;') : ''}" /></td>
     <td><select class="conv-select" data-id="${id}">${convOptionsHtml(state.conversionType)}</select></td>
     <td><span class="sk-now-cell" style="color:#6b7c8c;">—</span></td>
@@ -416,6 +430,22 @@ function updateRowLiveValue(tr, row, skSelfDoc) {
       skNowCell.textContent = fmtSkValue(skVal);
     }
   }
+
+  // Range (max - min raw value seen this scan) and, when it's crossed zero
+  // repeatedly, a small oscillation hint — this is the "did something move
+  // like a rudder/heel sensor would during my test" signal, without having
+  // to eyeball a live number ticking around.
+  const rangeCell = tr.querySelector('.range-cell');
+  if (rangeCell) {
+    if (row.range == null) {
+      rangeCell.textContent = '—';
+      rangeCell.style.fontWeight = 'normal';
+    } else {
+      const osc = row.signChanges != null && row.signChanges > 0 ? ` (⇄${row.signChanges})` : '';
+      rangeCell.textContent = row.range.toFixed(2) + osc;
+      rangeCell.style.fontWeight = row.signChanges > 3 ? '700' : 'normal';
+    }
+  }
 }
 
 // True if the user currently has focus/an open dropdown inside this row —
@@ -454,20 +484,32 @@ function applyFilters(rows) {
   });
 }
 
-function render(rows, skSelfDoc) {
-  const filtered = applyFilters(rows).sort((a, b) => {
+function sortRows(rows) {
+  const mode = document.getElementById('sortMode').value;
+  if (mode === 'range') {
+    return rows.slice().sort((a, b) => (b.range == null ? -1 : b.range) - (a.range == null ? -1 : a.range));
+  }
+  if (mode === 'signChanges') {
+    return rows.slice().sort((a, b) => (b.signChanges == null ? -1 : b.signChanges) - (a.signChanges == null ? -1 : a.signChanges));
+  }
+  return rows.slice().sort((a, b) => {
     const aMapped = savedMappings[a.id] ? 0 : 1;
     const bMapped = savedMappings[b.id] ? 0 : 1;
     if (aMapped !== bMapped) return aMapped - bMapped;
     return a.id - b.id;
   });
+}
+
+function render(rows, skSelfDoc) {
+  const filtered = sortRows(applyFilters(rows));
   const filteredIds = new Set(filtered.map(r => String(r.id)));
 
   // Drop rows that fell out of the current filter/scan — but never a row
-  // the user is actively interacting with (focused input/open dropdown),
-  // even if e.g. it just aged past the "only active" cutoff.
+  // the user is actively interacting with (focused input/open dropdown)
+  // or has its history chart open, even if e.g. it just aged past the
+  // "only active" cutoff.
   for (const [id, tr] of Array.from(rowElements.entries())) {
-    if (!filteredIds.has(String(id)) && !rowIsActive(tr)) {
+    if (!filteredIds.has(String(id)) && !rowIsActive(tr) && !historyRows.has(String(id))) {
       tr.remove();
       rowElements.delete(id);
     }
@@ -481,10 +523,13 @@ function render(rows, skSelfDoc) {
   }
 
   // Update existing rows in place (value + status dot only) and insert any
-  // genuinely new rows at their sorted position. Existing rows are never
-  // removed and re-created, and never reordered, so an open <select> stays
-  // exactly as the user left it.
-  let lastNode = null;
+  // genuinely new rows. Existing rows are never removed and re-created —
+  // an open <select> or a row's history-chart panel stays exactly as the
+  // user left it — but they ARE repositioned to match the current sort
+  // (a no-op in the default "Data ID" sort, but this is what makes
+  // "Most active" / "Most oscillating" sort actually reorder as values
+  // change, instead of just relabeling rows that stay stuck in ID order).
+  let refNode = tbody.firstChild;
   filtered.forEach(row => {
     let tr = rowElements.get(row.id);
     if (tr) {
@@ -492,24 +537,28 @@ function render(rows, skSelfDoc) {
     } else {
       tr = buildRow(row);
       rowElements.set(row.id, tr);
-      if (lastNode && lastNode.nextSibling) {
-        tbody.insertBefore(tr, lastNode.nextSibling);
-      } else if (lastNode) {
-        tbody.appendChild(tr);
-      } else if (tbody.firstChild) {
-        tbody.insertBefore(tr, tbody.firstChild);
-      } else {
-        tbody.appendChild(tr);
-      }
       updateRowLiveValue(tr, row, skSelfDoc);
     }
-    lastNode = tr;
+    if (tr !== refNode) {
+      tbody.insertBefore(tr, refNode);
+      // Keep a row's expanded history-chart detail row (if open) directly
+      // beneath it when it moves.
+      const detail = historyRows.get(String(row.id));
+      if (detail) tbody.insertBefore(detail, tr.nextSibling);
+    } else {
+      refNode = refNode.nextSibling;
+      // Skip over this row's own history-chart detail row, if open, so the
+      // next row lands after it rather than being inserted in between.
+      if (refNode && refNode.classList && refNode.classList.contains('hist-row')) {
+        refNode = refNode.nextSibling;
+      }
+    }
   });
 
   if (filtered.length === 0 && rowElements.size === 0) {
     tbody.innerHTML = rows.length === 0
-      ? '<tr><td colspan="7" style="color:#6b7c8c;">No scan running yet</td></tr>'
-      : '<tr><td colspan="7" style="color:#6b7c8c;">No channels match the current filters</td></tr>';
+      ? '<tr><td colspan="9" style="color:#6b7c8c;">No scan running yet</td></tr>'
+      : '<tr><td colspan="9" style="color:#6b7c8c;">No channels match the current filters</td></tr>';
   }
 
   document.getElementById('liveCount').textContent = rows.length + ' seen';
@@ -562,9 +611,13 @@ scanBtn.addEventListener('click', async () => {
   await api('api/scan/start', { method: 'POST', body: JSON.stringify({ minId: 0, maxId: 599, durationMs: minutes * 60 * 1000 }) });
   // Fresh scan — forget which rows were seen live before so the table
   // starts clean instead of keeping rows from a previous scan around.
+  // History is reset server-side too, so any open chart panels are now
+  // stale — close them rather than leave them showing last scan's data.
   seenActiveIds.clear();
   for (const tr of rowElements.values()) tr.remove();
   rowElements.clear();
+  for (const tr of historyRows.values()) tr.remove();
+  historyRows.clear();
   scanning = true;
   updateScanUi();
   if (!pollTimer) pollTimer = setInterval(poll, 1000);
@@ -593,6 +646,91 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
 document.getElementById('searchBox').addEventListener('input', () => poll());
 document.getElementById('onlyActive').addEventListener('change', () => poll());
 document.getElementById('onlyUnmapped').addEventListener('change', () => poll());
+document.getElementById('sortMode').addEventListener('change', () => poll());
+
+// ---- Per-channel history / sparkline (the "record & compare" workflow) --
+// id (string) -> the expanded <tr> showing that channel's chart, kept here
+// (rather than only as a DOM child of the row) so a re-render can find and
+// reposition it alongside its row, and so toggling is a simple map lookup.
+const historyRows = new Map();
+
+// Renders a channel's recorded {t, v} samples as a simple inline SVG line
+// chart, with a dashed reference line at zero (when the data actually
+// spans zero) — that's the shape to look for when hunting something like
+// a rudder or heel sensor that should center on 0.
+function renderSparkline(points) {
+  if (!points || points.length < 2) {
+    return '<div style="color:#6b7c8c;font-size:12px;padding:8px 0;">Not enough samples yet — leave the scan running a little longer.</div>';
+  }
+  const width = 560, height = 130, pad = 8;
+  const vals = points.map(p => p.v);
+  const min = Math.min(...vals);
+  const max = Math.max(...vals);
+  const range = (max - min) || 1;
+  const t0 = points[0].t;
+  const t1 = points[points.length - 1].t;
+  const tSpan = (t1 - t0) || 1;
+  const xy = (p) => {
+    const x = pad + ((p.t - t0) / tSpan) * (width - 2 * pad);
+    const y = height - pad - ((p.v - min) / range) * (height - 2 * pad);
+    return [x, y];
+  };
+  const coords = points.map(p => xy(p).map(n => n.toFixed(1)).join(',')).join(' ');
+  let zeroLine = '';
+  if (min <= 0 && max >= 0) {
+    const zy = (height - pad - ((0 - min) / range) * (height - 2 * pad)).toFixed(1);
+    zeroLine = `<line x1="${pad}" y1="${zy}" x2="${width - pad}" y2="${zy}" stroke="#c0392b" stroke-width="1" stroke-dasharray="3,3" />`;
+  }
+  return `<svg width="${width}" height="${height}" style="background:#fafbfc;border:1px solid #e0e4e8;border-radius:6px;display:block;">
+    ${zeroLine}
+    <polyline points="${coords}" fill="none" stroke="#1565c0" stroke-width="1.6" />
+  </svg>`;
+}
+
+async function refreshHistoryRow(id, detail) {
+  const body = detail.querySelector('.hist-body');
+  try {
+    const data = await api('api/scan/history/' + id);
+    const s = data.stats;
+    body.innerHTML = `
+      <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;">
+        <div>${renderSparkline(data.points)}</div>
+        <div style="font-size:12.5px;color:#33475b;min-width:170px;line-height:1.7;">
+          <div>${data.points.length} samples this scan</div>
+          <div>min <b>${s ? s.min.toFixed(2) : '—'}</b> · max <b>${s ? s.max.toFixed(2) : '—'}</b></div>
+          <div>range <b>${s ? s.range.toFixed(2) : '—'}</b></div>
+          <div>sign changes (⇄ 0) <b>${s ? s.signChanges : '—'}</b></div>
+          <button type="button" class="btn btn-ghost hist-refresh" style="margin-top:6px;padding:5px 10px;font-size:12px;">Refresh</button>
+        </div>
+      </div>`;
+    body.querySelector('.hist-refresh').addEventListener('click', () => refreshHistoryRow(id, detail));
+  } catch (e) {
+    body.innerHTML = '<div style="color:#c0392b;font-size:12px;">Failed to load history.</div>';
+  }
+}
+
+function toggleHistoryRow(id) {
+  const tr = rowElements.get(Number(id)) || rowElements.get(id);
+  if (!tr) return;
+  const existing = historyRows.get(String(id));
+  if (existing) {
+    existing.remove();
+    historyRows.delete(String(id));
+    return;
+  }
+  const detail = document.createElement('tr');
+  detail.className = 'hist-row';
+  detail.innerHTML = `<td colspan="9" style="background:#fafbfc;"><div class="hist-body" style="padding:12px 10px;">Loading…</div></td>`;
+  tr.insertAdjacentElement('afterend', detail);
+  historyRows.set(String(id), detail);
+  refreshHistoryRow(id, detail);
+}
+
+tbody.addEventListener('click', (e) => {
+  const btn = e.target.closest('.chart-btn');
+  if (!btn) return;
+  toggleHistoryRow(btn.dataset.id);
+});
 
 document.getElementById('skPathList').innerHTML = PATH_OPTIONS
   .filter(p => p)
