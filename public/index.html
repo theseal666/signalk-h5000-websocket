@@ -484,8 +484,7 @@ function applyFilters(rows) {
   });
 }
 
-function sortRows(rows) {
-  const mode = document.getElementById('sortMode').value;
+function sortByMode(rows, mode) {
   if (mode === 'range') {
     return rows.slice().sort((a, b) => (b.range == null ? -1 : b.range) - (a.range == null ? -1 : a.range));
   }
@@ -498,6 +497,21 @@ function sortRows(rows) {
     if (aMapped !== bMapped) return aMapped - bMapped;
     return a.id - b.id;
   });
+}
+
+// Sorting by "Most active" / "Most oscillating" is live — a row's rank can
+// jump every poll tick as its value changes. That's fine for rows you're
+// just scanning past, but a row you've opened a chart on would otherwise
+// get yanked to a new spot in the list (or off-screen) the moment its
+// value updates, making the chart you just opened look like it vanished.
+// Pin any row with an open history panel to a stable block at the top so
+// opening a chart always keeps it in view, no matter how the rest re-sorts.
+function sortRows(rows) {
+  const mode = document.getElementById('sortMode').value;
+  if (historyRows.size === 0) return sortByMode(rows, mode);
+  const pinned = rows.filter(r => historyRows.has(String(r.id)));
+  const rest = rows.filter(r => !historyRows.has(String(r.id)));
+  return sortByMode(pinned, 'id').concat(sortByMode(rest, mode));
 }
 
 function render(rows, skSelfDoc) {

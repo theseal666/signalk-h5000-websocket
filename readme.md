@@ -7,6 +7,10 @@ By pulling data directly from the H5000 web server over Ethernet, this plugin by
 
 ---
 
+## What's new in 2.1.1
+
+- **Fix: opening a chart while sorted by "Most active" or "Most oscillating" could make it look like the chart vanished.** Those sort modes re-rank rows live as values change, so a row you'd just opened a chart on could get shuffled elsewhere in the (long) list the moment its value updated — the chart wasn't actually gone, just scrolled out of view. Any row with an open chart is now pinned to a stable spot at the top of the table so this can't happen.
+
 ## What's new in 2.1.0
 
 - **Record & compare in the live mapping UI.** The discovery scan now keeps a rolling history (up to 2000 samples) per Data ID while it runs, and computes live stats — range and sign-change count — for each row. Sort the table by "Range" or "Sign changes" to instantly surface whichever channel is actually moving, and click the 📈 button on any row to expand an inline sparkline chart of its recent history (with a zero-reference line when the data spans zero). This replaces the old workflow of eyeballing a single live snapshot or asking someone to correlate an ad-hoc script capture by hand — now you can wiggle a sensor (e.g. the wheel/rudder) during a scan and immediately see, sorted and charted, which ID actually responded.
