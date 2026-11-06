@@ -7,6 +7,22 @@ By pulling data directly from the H5000 web server over Ethernet, this plugin by
 
 ---
 
+## What's new in 2.2.0
+
+Three reports from [@voodoomatz](https://github.com/voodoomatz)
+([#1](https://github.com/theseal666/signalk-h5000-websocket/issues/1),
+[#2](https://github.com/theseal666/signalk-h5000-websocket/issues/2),
+[#3](https://github.com/theseal666/signalk-h5000-websocket/issues/3)), each device-verified.
+
+- **The full H5000 Data ID catalog now ships with the plugin**, as [`docs/DATA_IDS.md`](docs/DATA_IDS.md) and as the machine-readable `data-ids.json` the plugin itself reads. All 522 firmware IDs, with the device's own short and long display names where it had a data provider to answer from. The live UI now names every channel it sees instead of the 28 this repo had worked out by hand.
+- **The Data ID space is fixed, not commissioned per boat.** This readme claimed the opposite, and the discovery workflow was built on that claim. The catalog is the same firmware dictionary on every CPU — only IDs from `1000` (`FirstConfigurable`) up are installation-specific. What varies per boat is which IDs are *live*, which is what a scan is actually for. The Dev-Tools walkthrough is demoted accordingly.
+- **Four channel labels in this plugin were simply wrong**, and the catalog corrects them: ID 17 is `CourseToSteer`, not a legacy speed-through-water; 165 is `DepthOffset`, not an alternative depth; 238 is `AftDepth`; and 150 is the *commanded* rudder angle, i.e. the autopilot's target, not the measured one. Mapping any of those as a depth or a rudder angle would have published a plausible-looking wrong number.
+- **The ~9 m position offset is explained.** IDs 309/310 are `Bow Position` latitude/longitude — the bow, not the GPS antenna. 421/422 (`GpsPositionLatitude/Longitude`) are the antenna, which is why they matched the MFD fix to ~2 m.
+- **Each mapped channel now gets its own `sourceRef`.** Values were emitted with no source discriminator, so the server appended a meaningless `.XX` and every channel collapsed into one indistinguishable source. The Data ID is now the discriminator — `signalk-h5000-websocket.146` — the way an NMEA 2000 device address is (`YDEN-02.36`). See the note under [Source priorities](#source-priorities) if you have priorities configured.
+- The local test fixture mapped ID 15 to `steering.rudderAngle` and ID 42 to `rigging.forestay.tension` — navigation data onto the rudder path, boat speed onto a rigging path. It now uses 146 and 393, and asserts the per-ID `sourceRef`.
+
+Issue #1 (orphaned sockets on config save, and a crash in the error handler) was already fixed in 2.0.0, which rebuilt the connection handling so each handler closes over its own socket and only the current one may schedule a reconnect — the same shape the report proposed. The regression test for it is the "Clean stop" check in `npm test`.
+
 ## What's new in 2.1.1
 
 - **Fix: opening a chart while sorted by "Most active" or "Most oscillating" could make it look like the chart vanished.** Those sort modes re-rank rows live as values change, so a row you'd just opened a chart on could get shuffled elsewhere in the (long) list the moment its value updated — the chart wasn't actually gone, just scrolled out of view. Any row with an open chart is now pinned to a stable spot at the top of the table so this can't happen.
@@ -53,9 +69,17 @@ The B&G H5000 CPU exposes its internal data dictionary through Navico's GoFree D
 5. Click **Save Mappings** — the plugin reconnects its production feed with the new mapping immediately.
 6. Click **Stop scan** when done, or let the scan window expire (default 5 minutes) — it always auto-stops so it never runs indefinitely.
 
-### Fallback: Discover Data IDs via Browser Developer Tools
+### Look the ID up first
 
-Because every modern sailboat is equipped with a distinct set of sensors (e.g., custom linear rudder feedback, forestay load cells, mast rotation, or tank gauges), the H5000 maps variables dynamically based on how your network was commissioned.
+The Data ID space is a **fixed, firmware-defined dictionary** — the same ID means the same thing on every H5000 CPU, and only IDs from `1000` (`FirstConfigurable`) up are reserved for installation-specific channels. So the first step is never discovery, it is a lookup: find the channel by name in [`docs/DATA_IDS.md`](docs/DATA_IDS.md), which ships with the plugin.
+
+What differs between boats is only which IDs are **live**. An ID answers only when something on the network provides its data, so the engine, tank, AC and charger ranges stay silent on a boat without those N2K sources. That is what the scan above is for: confirming that the channel you looked up actually transmits here, and that its value tracks the physical sensor. It is not for working out what an ID means.
+
+For a channel at ID 1000 or above, discovery is genuinely the only route — those are the configurable ones.
+
+### Fallback: watch the raw frames in Browser Developer Tools
+
+Useful when you want to see the unprocessed stream, e.g. to confirm a channel transmits at all without starting a scan.
 
 1. Connect a laptop or nav-station computer to the boat's network and navigate to the H5000 web interface (`http://<YOUR_H5000_IP>`).
 2. Press **F12** (or Right-Click -> *Inspect*) to open your browser's Developer Tools.
@@ -100,6 +124,16 @@ See `troubleshoot.md` for the full investigation history. Current best-known set
 Note: 123 (AttitudePitch) / 124 (AttitudeRoll) are the vendor-correct Data IDs for pitch/roll but were confirmed **not** to actually broadcast from this particular H5000 unit — pitch/roll are sourced from a separate IMU (racebox) plugin instead.
 
 Note: 146 (rudder angle) was independently re-confirmed on 2026-09-06 with a live, timestamp-correlated oscillation test using the record & compare workflow above (see "What's new in 2.1.0").
+
+### Source priorities
+
+Since 2.2.0 each mapped channel is published under its own Data ID as the source discriminator, so the `sourceRef` for a value from ID 146 is `signalk-h5000-websocket.146`, not a collective `signalk-h5000-websocket.XX`.
+
+This is what makes a channel individually addressable: you can prioritise the H5000's heading over an N2K gateway's while leaving other IDs subordinate, and each channel shows up separately in the Data Browser.
+
+**It also means that if a mapped path is already served by another source and you have source priorities configured for that path, you must list the plugin's per-ID `sourceRef`s there explicitly.** A sourceRef the priority list does not mention is silently dropped by the server, so a channel that worked before you configured priorities will simply stop appearing.
+
+A compound `navigation.position` built from a latitude and a longitude ID is sourced under both, sorted — e.g. `signalk-h5000-websocket.421+422`.
 
 ---
 

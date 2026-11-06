@@ -34,41 +34,53 @@ const WebSocket = require('ws');
 const path = require('path');
 const express = require('express');
 
-// Known Data ID -> human label, built from the H5000's own eDataType enum
-// (extracted from the unit's vendor JavaScript) plus IDs confirmed live
-// against real sailing conditions on 2026-08-16. Anything not in this map
-// still shows up in the live view as "ID <n>" with its raw value — the
-// point of the live view is that you don't need the label to be useful,
-// you can eyeball the live number against the plotter and map it yourself.
-const KNOWN_LABELS = {
-  17: 'SpeedThroughWater (legacy ID, often silent)',
-  37: 'Heading',
-  41: 'SpeedOverGround',
-  42: 'SpeedThroughWater',
-  46: 'AWS (Apparent Wind Speed)',
-  47: 'TWS (True Wind Speed)',
-  48: 'Water Temperature (°C)',
-  77: 'Depth Below Transducer',
-  123: 'Attitude Pitch',
-  124: 'Attitude Roll',
-  125: 'Magnetic Variation',
-  140: 'AWA (Apparent Wind Angle)',
-  141: 'TWA Water (True Wind Angle, water ref)',
-  142: 'TWD (True Wind Direction)',
-  146: 'Rudder Angle (confirmed via oscillation test, 2026-09-06)',
-  150: 'Rudder Angle (alt)',
-  165: 'Depth (alt)',
-  228: 'Target True Wind Angle',
-  234: 'Target Boat Speed',
-  238: 'Depth (alt 2)',
-  240: 'Polar Speed',
-  384: 'TWS Correction (calibration factor, not an angle)',
-  309: 'Latitude (candidate, ~9m off MFD fix)',
-  310: 'Longitude (candidate, ~9m off MFD fix)',
-  421: 'Latitude (best GPS match, ~2m to MFD fix)',
-  422: 'Longitude (best GPS match, ~2m to MFD fix)',
-  497: 'Boat Speed (candidate)'
+// The H5000's Data ID space is a fixed, firmware-defined dictionary: the
+// same ID means the same thing on every CPU, and only IDs from 1000 up
+// (the catalog's own `FirstConfigurable`) are installation-specific. The
+// full catalog is in data-ids.json, documented in docs/DATA_IDS.md. It was
+// contributed by @voodoomatz (issue #3), extracted from the H5000's own
+// WebSocket service and then re-verified against a live CPU through that
+// service's introspection query, {"DataInfoReq":[<ids>]}.
+//
+// What varies per installation is only which IDs are LIVE — an ID answers
+// only when something on the network actually provides its data. That is
+// what the discovery scan is for: confirming a channel transmits on this
+// boat, not working out what its ID means.
+const DATA_IDS = require('./data-ids.json');
+
+// Local observations from this boat, appended to a channel's catalog
+// label. These are the things the catalog cannot tell you: which channels
+// this particular unit broadcasts at all, and how its values compared
+// against the MFD when they were checked.
+const LOCAL_NOTES = {
+  48: 'reports \u00b0C, so use the celsius conversion (checked against the MFD 2026-08-16)',
+  123: 'not broadcast by this unit; pitch comes from the racebox IMU plugin instead',
+  124: 'not broadcast by this unit; roll comes from the racebox IMU plugin instead',
+  146: 'confirmed by a timestamp-correlated oscillation test 2026-09-06',
+  309: 'the bow, not the GPS antenna, which is why it reads ~9 m off the MFD fix',
+  310: 'the bow, not the GPS antenna, which is why it reads ~9 m off the MFD fix',
+  384: 'a calibration factor, not an angle',
+  421: 'closest GPS match on this unit, ~2 m to the MFD fix',
+  422: 'closest GPS match on this unit, ~2 m to the MFD fix'
 };
+
+// id -> the one display string the live UI shows. The device's own short
+// name is what the H5000 and the mast plotters put on screen, so it is
+// kept next to the long name: that is the string you cross-check against
+// on deck. IDs outside the catalog (>= 1000, or above its range) stay
+// unlabeled and the UI shows them as "ID <n>" with their raw value.
+const KNOWN_LABELS = (() => {
+  const labels = {};
+  for (const [id, entry] of Object.entries(DATA_IDS)) {
+    let label;
+    if (entry.lname && entry.sname) label = `${entry.lname} (${entry.sname})`;
+    else if (entry.lname) label = entry.lname;
+    else label = entry.name;
+    if (LOCAL_NOTES[id]) label += ` \u2014 ${LOCAL_NOTES[id]}`;
+    labels[id] = label;
+  }
+  return labels;
+})();
 
 const CONVERSIONS = {
   none: (v) => v,
@@ -214,15 +226,19 @@ module.exports = function (app) {
         if (mapping.conversionType === 'latitude' || mapping.conversionType === 'longitude') {
           const entry = positionCache.get(mapping.path) || {};
           const now = Date.now();
-          if (mapping.conversionType === 'latitude') entry.lat = { value: skValue, ts: now };
-          else entry.lon = { value: skValue, ts: now };
+          if (mapping.conversionType === 'latitude') entry.lat = { value: skValue, ts: now, id: item.id };
+          else entry.lon = { value: skValue, ts: now, id: item.id };
           positionCache.set(mapping.path, entry);
 
           if (entry.lat && entry.lon && Math.abs(entry.lat.ts - entry.lon.ts) <= POSITION_PAIR_MAX_AGE_MS) {
+            // One fix is built from two Data IDs, so it is sourced under
+            // both (e.g. 421+422), sorted so the sourceRef is the same
+            // whichever half arrived last.
+            const src = [entry.lat.id, entry.lon.id].sort((a, b) => a - b).join('+');
             app.handleMessage(plugin.id, {
               updates: [
                 {
-                  source: { label: plugin.id },
+                  source: { label: plugin.id, src },
                   timestamp: new Date().toISOString(),
                   values: [{ path: mapping.path, value: { latitude: entry.lat.value, longitude: entry.lon.value } }]
                 }
@@ -232,10 +248,18 @@ module.exports = function (app) {
           continue;
         }
 
+        // The Data ID is the source discriminator: without an `src` the
+        // server's getSourceId() appends a meaningless `.XX` and every
+        // mapped channel collapses into one indistinguishable source. With
+        // it, each channel gets a stable, self-describing sourceRef that
+        // maps 1:1 onto the H5000 catalog, the way an NMEA 2000 device
+        // address does (`<label>.<dataId>`, as in YDEN-02.36). That is what
+        // makes a channel individually addressable in the server's source
+        // priorities and individually visible in the Data Browser.
         app.handleMessage(plugin.id, {
           updates: [
             {
-              source: { label: plugin.id },
+              source: { label: plugin.id, src: String(item.id) },
               timestamp: new Date().toISOString(),
               values: [{ path: mapping.path, value: skValue }]
             }
